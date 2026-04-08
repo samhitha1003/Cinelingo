@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+konlpy
+openai-whisper
+python-multipart
+librosa
+numpy
+requests
