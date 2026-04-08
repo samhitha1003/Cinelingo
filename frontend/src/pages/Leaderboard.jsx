@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const API = 'http://localhost:8080';
+const API = 'http://localhost:8081';
 const tok = () => localStorage.getItem('cinelingo_token') || '';
 const hdr = () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${tok()}` });
 

@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const AI_BASE_URL = 'http://localhost:8000/api';
+const AI_BASE_URL = 'http://localhost:8081/api';
 
 const aiAPI = {
 
