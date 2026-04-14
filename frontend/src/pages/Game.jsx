@@ -369,14 +369,42 @@ function GameCanvas({ gameState, onAction }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // FUZZY MATCH
 // ─────────────────────────────────────────────────────────────────────────────
+const MATCH_THRESHOLD = 0.65;
+
+function normalize(str) {
+  return str.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let curr = new Array(n + 1);
+
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
 function fuzzyMatch(spoken, target) {
-  const s = spoken.trim().toLowerCase().replace(/\s+/g,' ');
-  const t = target.trim().toLowerCase();
-  if (s === t || s.includes(t) || t.includes(s)) return true;
-  // Character overlap score
-  let matches = 0;
-  for (const ch of s) { if (t.includes(ch)) matches++; }
-  return (matches / Math.max(s.length, t.length)) > 0.6;
+  const s = normalize(spoken);
+  const t = normalize(target);
+
+  if (s === t || s.includes(t) || t.includes(s)) {
+    return { score: 1, match: true };
+  }
+
+  const dist = levenshtein(s, t);
+  const maxLen = Math.max(s.length, t.length);
+  const score = 1 - dist / maxLen;
+
+  return { score, match: score >= MATCH_THRESHOLD };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -416,6 +444,23 @@ export default function Game() {
   const livesRef  = useRef(3);
   const comboRef  = useRef(0);
   const stageRef  = useRef(0);
+  const timeoutRef = useRef([]);
+
+  const safeTimeout = (fn, delay) => {
+    const id = setTimeout(fn, delay);
+    timeoutRef.current.push(id);
+  };
+
+  const clearAllTimeouts = () => {
+    timeoutRef.current.forEach(clearTimeout);
+    timeoutRef.current = [];
+  };
+
+  const handleSpokenRef = useRef(null);
+
+  useEffect(() => {
+    return () => clearAllTimeouts();
+  }, []);
 
   // ── Setup speech recognition ──────────────────────────────────────────────
   const setupRecognition = useCallback(() => {
@@ -426,31 +471,20 @@ export default function Game() {
     r.onresult = (e) => {
       const text = e.results[0][0].transcript.trim();
       setHeard(text);
-      handleSpoken(text);
+      handleSpokenRef.current?.(text);
     };
     r.onend = () => setListening(false);
     r.onerror = () => { setListening(false); setFeedback({ text:'Mic error — try again', type:'error' }); };
     return r;
-  }, [mode, stageIdx]);
+  }, []);
 
   useEffect(() => {
     recRef.current = setupRecognition();
     return () => recRef.current?.abort();
   }, [setupRecognition]);
 
-  // ── Timer ─────────────────────────────────────────────────────────────────
-  const startTimer = (seconds) => {
-    clearInterval(timerRef.current);
-    let t = seconds;
-    timerRef.current = setInterval(() => {
-      t--;
-      setTimeLeft(t);
-      if (t <= 0) { clearInterval(timerRef.current); endGame('timeout'); }
-    }, 1000);
-  };
-
   // ── Spawn enemies ──────────────────────────────────────────────────────────
-  const spawnEnemies = (count, speed) => {
+  const spawnEnemies = useCallback((count, speed) => {
     const enemies = [];
     for (let i = 0; i < count; i++) {
       enemies.push({
@@ -463,7 +497,7 @@ export default function Game() {
       });
     }
     setGameState(prev => ({ ...prev, enemies }));
-  };
+  }, []);
 
   // ── Start game ────────────────────────────────────────────────────────────
   const startGame = (selectedMode) => {
@@ -517,6 +551,53 @@ export default function Game() {
     }
   }, [mode, user]);
 
+  // ── Timer ─────────────────────────────────────────────────────────────────
+  const startTimer = useCallback((seconds) => {
+    clearInterval(timerRef.current);
+
+    setTimeLeft(seconds);
+
+    timerRef.current = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 1) {
+          clearInterval(timerRef.current);
+          endGame('timeout');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }, [endGame]);
+
+  const applyAction = useCallback((action) => {
+    setGameState(prev => {
+      let x = prev.player.x;
+      let hidden = false, attacking = false;
+
+      if (action === 'moveLeft') x = Math.max(5, x - 20);
+      if (action === 'moveRight') x = Math.min(90, x + 20);
+      if (action === 'runFast') x = Math.min(90, x + 30);
+      if (action === 'hide') hidden = true;
+      if (action === 'attack') attacking = true;
+
+      return {
+        ...prev,
+        player: { ...prev.player, x, action, hidden, attacking }
+      };
+    });
+
+    // Reset attacking state
+    if (action === 'attack') safeTimeout(() => setGameState(prev => ({ ...prev, player: { ...prev.player, attacking: false } })), 1000);
+    if (action === 'hide') safeTimeout(() => setGameState(prev => ({ ...prev, player: { ...prev.player, hidden: false } })), 3000);
+  }, []);
+
+  const shakePlayer = useCallback(() => {
+    const origX = gameState.player.x;
+    setGameState(prev => ({ ...prev, player: { ...prev.player, x: prev.player.x + 4 } }));
+    safeTimeout(() => setGameState(prev => ({ ...prev, player: { ...prev.player, x: prev.player.x - 8 } })), 100);
+    safeTimeout(() => setGameState(prev => ({ ...prev, player: { ...prev.player, x: origX } })), 200);
+  }, [gameState.player.x]);
+
   // ── Handle spoken command ──────────────────────────────────────────────────
   const handleSpoken = useCallback((text) => {
     if (!mode) return;
@@ -526,7 +607,8 @@ export default function Game() {
       const stage = stages[stageRef.current];
       if (!stage) return;
 
-      if (fuzzyMatch(text, stage.expected)) {
+      const { score, match } = fuzzyMatch(text, stage.expected);
+      if (match) {
         // Success
         const bonusMultiplier = 1 + comboRef.current * 0.1;
         const points = Math.round(stage.reward * bonusMultiplier);
@@ -536,7 +618,15 @@ export default function Game() {
         setCombo(comboRef.current);
         setStreak(p => p + 1);
         setCompletedWords(p => [...p, stage.expected]);
-        setFeedback({ text: `✅ 완벽해요! +${points}${comboRef.current > 1 ? ` 🔥×${comboRef.current}` : ''}`, type:'success' });
+        let feedbackText = '';
+
+        if (score > 0.85) feedbackText = "🔥 Perfect!";
+        else if (score > 0.7) feedbackText = "👍 Almost!";
+        else feedbackText = "👌 Close!";
+        setFeedback({
+          text: `${feedbackText} (${Math.round(score * 100)}%) +${points}`,
+          type: 'success'
+        });
 
         // Animate player action
         const action = stage.expected.includes('왼쪽') ? 'moveLeft'
@@ -554,9 +644,9 @@ export default function Game() {
           ...prev,
           scorePopup: { value: points, x: 50, age: 0 },
         }));
-        setTimeout(() => setGameState(prev => ({ ...prev, scorePopup: null })), 2000);
+        safeTimeout(() => setGameState(prev => ({ ...prev, scorePopup: null })), 2000);
 
-        setTimeout(() => {
+        safeTimeout(() => {
           const next = stageRef.current + 1;
           if (next >= stages.length) {
             endGame('victory');
@@ -578,12 +668,12 @@ export default function Game() {
         setLives(livesRef.current);
         setFeedback({ text: `❌ Wrong! Say: ${stage.hint}`, type:'error' });
         shakePlayer();
-        if (livesRef.current <= 0) setTimeout(() => endGame('gameover'), 1000);
+        if (livesRef.current <= 0) safeTimeout(() => endGame('gameover'), 1000);
       }
     } else {
       // Story mode
       const vocab = mode.data.vocab || [];
-      const matched = vocab.find(w => fuzzyMatch(text, w.korean));
+      const matched = vocab.find(w => fuzzyMatch(text, w.korean).match);
       if (matched) {
         const alreadyDone = completedWords.includes(matched.korean);
         if (!alreadyDone) {
@@ -597,11 +687,11 @@ export default function Game() {
           setFeedback({ text: `✅ ${matched.korean} — ${matched.english}! +${pts}`, type:'success' });
           applyAction(matched.action);
           setGameState(prev => ({ ...prev, scorePopup: { value: pts, x: 50, age: 0 } }));
-          setTimeout(() => setGameState(prev => ({ ...prev, scorePopup: null })), 1500);
+          safeTimeout(() => setGameState(prev => ({ ...prev, scorePopup: null })), 1500);
 
           // Check if all words done
           if (completedWords.length + 1 >= vocab.length) {
-            setTimeout(() => endGame('victory'), 1500);
+            safeTimeout(() => endGame('victory'), 1500);
           }
         } else {
           setFeedback({ text:`⭐ ${matched.korean} — already done! Try another.`, type:'info' });
@@ -614,38 +704,11 @@ export default function Game() {
         if (livesRef.current <= 0) endGame('gameover');
       }
     }
-  }, [mode, completedWords, endGame]);
+  }, [mode, completedWords, endGame, applyAction, shakePlayer, startTimer, spawnEnemies]);
 
-  const applyAction = (action) => {
-    setGameState(prev => {
-      let { x } = prev.player;
-      let hidden = false, attacking = false;
-
-      switch(action) {
-        case 'moveLeft':  x = Math.max(5, x - 20); break;
-        case 'moveRight': x = Math.min(90, x + 20); break;
-        case 'run':       x = Math.min(90, x + 15); break;
-        case 'runFast':   x = Math.min(90, x + 30); break;
-        case 'hide':      hidden = true; break;
-        case 'attack':    attacking = true; break;
-        case 'jump':      break; // handled by animation
-        default: break;
-      }
-
-      return { ...prev, player: { ...prev.player, x, action, hidden, attacking } };
-    });
-
-    // Reset attacking state
-    if (action === 'attack') setTimeout(() => setGameState(prev => ({ ...prev, player: { ...prev.player, attacking: false } })), 1000);
-    if (action === 'hide') setTimeout(() => setGameState(prev => ({ ...prev, player: { ...prev.player, hidden: false } })), 3000);
-  };
-
-  const shakePlayer = () => {
-    const origX = gameState.player.x;
-    setGameState(prev => ({ ...prev, player: { ...prev.player, x: prev.player.x + 4 } }));
-    setTimeout(() => setGameState(prev => ({ ...prev, player: { ...prev.player, x: prev.player.x - 8 } })), 100);
-    setTimeout(() => setGameState(prev => ({ ...prev, player: { ...prev.player, x: origX } })), 200);
-  };
+  useEffect(() => {
+    handleSpokenRef.current = handleSpoken;
+  }, [handleSpoken]);
 
   const speak = () => {
     if (!recRef.current || listening) return;
